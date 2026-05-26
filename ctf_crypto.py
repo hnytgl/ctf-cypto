@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 # coding: utf-8
-"""Unified CTF crypto encode/decode helper.
-
-This tool keeps the old one-file scripts intact and adds a Python 3 CLI for
-common CTF encoding, decoding and classical cipher tasks.
-"""
+"""Unified Python 3 CTF crypto encode/decode helper."""
 
 from __future__ import annotations
 
 import argparse
 import base64
 import binascii
+import codecs
 import hashlib
 import html
+import json
 import quopri
 import sys
 import urllib.parse
@@ -59,6 +57,14 @@ MORSE_TABLE = {
     "9": "----.",
 }
 MORSE_REVERSE = {value: key for key, value in MORSE_TABLE.items()}
+
+BASE45_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+BASE91_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "!#$%&()*+,./:;<=>?@[]^_`{|}~\""
+)
 
 BACON_TABLE = {
     chr(ord("a") + i): format(i, "05b").replace("0", "a").replace("1", "b")
@@ -135,6 +141,171 @@ def ascii85_decode(data: str, args: argparse.Namespace) -> str:
     return decode_base(data, base64.a85decode, args.encoding)
 
 
+def base64url_encode(data: str, args: argparse.Namespace) -> str:
+    encoded = base64.urlsafe_b64encode(to_bytes(data, args.encoding)).decode("ascii")
+    return encoded if args.padding else encoded.rstrip("=")
+
+
+def base64url_decode(data: str, args: argparse.Namespace) -> str:
+    padded = data + "=" * (-len(data) % 4)
+    return from_bytes(base64.urlsafe_b64decode(padded), args.encoding)
+
+
+def base32hex_encode(data: str, args: argparse.Namespace) -> str:
+    return base64.b32hexencode(to_bytes(data, args.encoding)).decode("ascii")
+
+
+def base32hex_decode(data: str, args: argparse.Namespace) -> str:
+    return from_bytes(base64.b32hexdecode(to_bytes(data.upper(), "ascii")), args.encoding)
+
+
+def base36_encode(data: str, args: argparse.Namespace) -> str:
+    return _base_n_encode(to_bytes(data, args.encoding), "0123456789abcdefghijklmnopqrstuvwxyz")
+
+
+def base36_decode(data: str, args: argparse.Namespace) -> str:
+    return from_bytes(_base_n_decode(data.lower(), "0123456789abcdefghijklmnopqrstuvwxyz"), args.encoding)
+
+
+def base45_encode(data: str, args: argparse.Namespace) -> str:
+    raw = to_bytes(data, args.encoding)
+    output = []
+    for index in range(0, len(raw), 2):
+        chunk = raw[index : index + 2]
+        if len(chunk) == 2:
+            value = chunk[0] * 256 + chunk[1]
+            output.extend(
+                [
+                    BASE45_ALPHABET[value % 45],
+                    BASE45_ALPHABET[(value // 45) % 45],
+                    BASE45_ALPHABET[value // (45 * 45)],
+                ]
+            )
+        else:
+            value = chunk[0]
+            output.extend([BASE45_ALPHABET[value % 45], BASE45_ALPHABET[value // 45]])
+    return "".join(output)
+
+
+def base45_decode(data: str, args: argparse.Namespace) -> str:
+    output = bytearray()
+    index = 0
+    while index < len(data):
+        chunk = data[index : index + 3]
+        if len(chunk) == 3:
+            value = (
+                BASE45_ALPHABET.index(chunk[0])
+                + BASE45_ALPHABET.index(chunk[1]) * 45
+                + BASE45_ALPHABET.index(chunk[2]) * 45 * 45
+            )
+            output.extend(divmod(value, 256))
+            index += 3
+        elif len(chunk) == 2:
+            value = BASE45_ALPHABET.index(chunk[0]) + BASE45_ALPHABET.index(chunk[1]) * 45
+            output.append(value)
+            index += 2
+        else:
+            raise ValueError("invalid base45 length")
+    return from_bytes(bytes(output), args.encoding)
+
+
+def base58_encode(data: str, args: argparse.Namespace) -> str:
+    return _base_n_encode(to_bytes(data, args.encoding), BASE58_ALPHABET)
+
+
+def base58_decode(data: str, args: argparse.Namespace) -> str:
+    return from_bytes(_base_n_decode(data, BASE58_ALPHABET), args.encoding)
+
+
+def base62_encode(data: str, args: argparse.Namespace) -> str:
+    return _base_n_encode(to_bytes(data, args.encoding), BASE62_ALPHABET)
+
+
+def base62_decode(data: str, args: argparse.Namespace) -> str:
+    return from_bytes(_base_n_decode(data, BASE62_ALPHABET), args.encoding)
+
+
+def base91_encode(data: str, args: argparse.Namespace) -> str:
+    raw = to_bytes(data, args.encoding)
+    bit_queue = 0
+    bit_count = 0
+    output = []
+    for byte in raw:
+        bit_queue |= byte << bit_count
+        bit_count += 8
+        if bit_count > 13:
+            value = bit_queue & 8191
+            if value > 88:
+                bit_queue >>= 13
+                bit_count -= 13
+            else:
+                value = bit_queue & 16383
+                bit_queue >>= 14
+                bit_count -= 14
+            output.append(BASE91_ALPHABET[value % 91])
+            output.append(BASE91_ALPHABET[value // 91])
+    if bit_count:
+        output.append(BASE91_ALPHABET[bit_queue % 91])
+        if bit_count > 7 or bit_queue > 90:
+            output.append(BASE91_ALPHABET[bit_queue // 91])
+    return "".join(output)
+
+
+def base91_decode(data: str, args: argparse.Namespace) -> str:
+    value = -1
+    bit_queue = 0
+    bit_count = 0
+    output = bytearray()
+    table = {char: index for index, char in enumerate(BASE91_ALPHABET)}
+    for char in data:
+        if char not in table:
+            continue
+        if value < 0:
+            value = table[char]
+        else:
+            value += table[char] * 91
+            bit_queue |= value << bit_count
+            bit_count += 13 if (value & 8191) > 88 else 14
+            while bit_count > 7:
+                output.append(bit_queue & 255)
+                bit_queue >>= 8
+                bit_count -= 8
+            value = -1
+    if value >= 0:
+        output.append((bit_queue | value << bit_count) & 255)
+    return from_bytes(bytes(output), args.encoding)
+
+
+def _base_n_encode(raw: bytes, alphabet: str) -> str:
+    if not raw:
+        return ""
+    base = len(alphabet)
+    value = int.from_bytes(raw, "big")
+    encoded = []
+    while value:
+        value, remainder = divmod(value, base)
+        encoded.append(alphabet[remainder])
+    pad = 0
+    for byte in raw:
+        if byte == 0:
+            pad += 1
+        else:
+            break
+    return alphabet[0] * pad + "".join(reversed(encoded or [alphabet[0]]))
+
+
+def _base_n_decode(data: str, alphabet: str) -> bytes:
+    if not data:
+        return b""
+    base = len(alphabet)
+    value = 0
+    for char in data:
+        value = value * base + alphabet.index(char)
+    raw = value.to_bytes((value.bit_length() + 7) // 8, "big") if value else b""
+    pad = len(data) - len(data.lstrip(alphabet[0]))
+    return b"\x00" * pad + raw
+
+
 def hex_encode(data: str, args: argparse.Namespace) -> str:
     return to_bytes(data, args.encoding).hex()
 
@@ -195,12 +366,54 @@ def qp_decode(data: str, args: argparse.Namespace) -> str:
     return from_bytes(quopri.decodestring(to_bytes(data, "ascii")), args.encoding)
 
 
+def unicode_escape_encode(data: str, args: argparse.Namespace) -> str:
+    return data.encode("unicode_escape").decode("ascii")
+
+
+def unicode_escape_decode(data: str, args: argparse.Namespace) -> str:
+    return codecs.decode(data, "unicode_escape")
+
+
+def punycode_encode(data: str, args: argparse.Namespace) -> str:
+    return data.encode("punycode").decode("ascii")
+
+
+def punycode_decode(data: str, args: argparse.Namespace) -> str:
+    return data.encode("ascii").decode("punycode")
+
+
+def jwt_decode(data: str, args: argparse.Namespace) -> str:
+    parts = data.strip().split(".")
+    decoded = []
+    for part in parts[:2]:
+        padded = part + "=" * (-len(part) % 4)
+        raw = base64.urlsafe_b64decode(padded)
+        try:
+            decoded.append(json.dumps(json.loads(raw), ensure_ascii=False, indent=2))
+        except json.JSONDecodeError:
+            decoded.append(from_bytes(raw, args.encoding))
+    if len(parts) > 2:
+        decoded.append(f"signature(base64url): {parts[2]}")
+    return "\n.\n".join(decoded)
+
+
 def reverse(data: str, args: argparse.Namespace) -> str:
     return data[::-1]
 
 
 def rot13(data: str, args: argparse.Namespace) -> str:
     return caesar_shift(data, 13)
+
+
+def rot47(data: str, args: argparse.Namespace) -> str:
+    output = []
+    for char in data:
+        code = ord(char)
+        if 33 <= code <= 126:
+            output.append(chr(33 + ((code - 33 + 47) % 94)))
+        else:
+            output.append(char)
+    return "".join(output)
 
 
 def caesar_shift(data: str, shift: int) -> str:
@@ -237,6 +450,33 @@ def atbash(data: str, args: argparse.Namespace) -> str:
         else:
             output.append(char)
     return "".join(output)
+
+
+def affine_transform(data: str, a: int, b: int, decrypt: bool = False) -> str:
+    inverse = None
+    if decrypt:
+        inverse = pow(a, -1, 26)
+    output = []
+    for char in data:
+        if char.isalpha():
+            base = ord("A") if char.isupper() else ord("a")
+            value = ord(char) - base
+            if decrypt:
+                value = inverse * (value - b) % 26
+            else:
+                value = (a * value + b) % 26
+            output.append(chr(base + value))
+        else:
+            output.append(char)
+    return "".join(output)
+
+
+def affine_encode(data: str, args: argparse.Namespace) -> str:
+    return affine_transform(data, args.a, args.b, decrypt=False)
+
+
+def affine_decode(data: str, args: argparse.Namespace) -> str:
+    return affine_transform(data, args.a, args.b, decrypt=True)
 
 
 def vigenere(data: str, key: str, decrypt: bool = False) -> str:
@@ -377,8 +617,15 @@ def hash_text(data: str, args: argparse.Namespace) -> str:
 ALGORITHMS: dict[str, Algorithm] = {
     "base16": Algorithm("base16", "Base16 encode/decode", base16_encode, base16_decode),
     "base32": Algorithm("base32", "Base32 encode/decode", base32_encode, base32_decode),
+    "base32hex": Algorithm("base32hex", "Base32hex encode/decode", base32hex_encode, base32hex_decode),
     "base64": Algorithm("base64", "Base64 encode/decode", base64_encode, base64_decode),
+    "base64url": Algorithm("base64url", "URL-safe Base64 encode/decode", base64url_encode, base64url_decode),
+    "base36": Algorithm("base36", "Base36 encode/decode", base36_encode, base36_decode),
+    "base45": Algorithm("base45", "Base45 encode/decode", base45_encode, base45_decode),
+    "base58": Algorithm("base58", "Base58 encode/decode", base58_encode, base58_decode),
+    "base62": Algorithm("base62", "Base62 encode/decode", base62_encode, base62_decode),
     "base85": Algorithm("base85", "Base85 encode/decode", base85_encode, base85_decode),
+    "base91": Algorithm("base91", "Base91 encode/decode", base91_encode, base91_decode),
     "ascii85": Algorithm("ascii85", "Ascii85 encode/decode", ascii85_encode, ascii85_decode),
     "hex": Algorithm("hex", "Hex encode/decode", hex_encode, hex_decode),
     "bin": Algorithm("bin", "Binary byte encode/decode", binary_encode, binary_decode),
@@ -387,10 +634,15 @@ ALGORITHMS: dict[str, Algorithm] = {
     "url": Algorithm("url", "URL percent encode/decode", url_encode, url_decode),
     "html": Algorithm("html", "HTML entity encode/decode", html_encode, html_decode),
     "qp": Algorithm("qp", "Quoted-printable encode/decode", qp_encode, qp_decode),
+    "unicode": Algorithm("unicode", "Unicode escape encode/decode", unicode_escape_encode, unicode_escape_decode),
+    "punycode": Algorithm("punycode", "Punycode encode/decode", punycode_encode, punycode_decode),
+    "jwt": Algorithm("jwt", "Decode JWT header/payload without verification", None, jwt_decode),
     "reverse": Algorithm("reverse", "Reverse string", reverse, reverse),
     "rot13": Algorithm("rot13", "ROT13 transform", rot13, rot13),
+    "rot47": Algorithm("rot47", "ROT47 transform", rot47, rot47),
     "caesar": Algorithm("caesar", "Caesar cipher", caesar_encode, caesar_decode, caesar_brute),
     "atbash": Algorithm("atbash", "Atbash cipher", atbash, atbash),
+    "affine": Algorithm("affine", "Affine cipher ax+b mod 26", affine_encode, affine_decode),
     "vigenere": Algorithm("vigenere", "Vigenere cipher", vigenere_encode, vigenere_decode),
     "xor": Algorithm("xor", "Repeating-key XOR", xor_encode, xor_decode),
     "morse": Algorithm("morse", "Morse code", morse_encode, morse_decode),
@@ -402,12 +654,24 @@ ALGORITHMS: dict[str, Algorithm] = {
 ALIASES = {
     "b16": "base16",
     "b32": "base32",
+    "b32hex": "base32hex",
     "b64": "base64",
+    "b64url": "base64url",
+    "base64-url": "base64url",
+    "b36": "base36",
+    "b45": "base45",
+    "b58": "base58",
+    "b62": "base62",
     "b85": "base85",
+    "b91": "base91",
     "binary": "bin",
     "octal": "oct",
     "decimal": "dec",
     "quote-printable": "qp",
+    "urlencode": "url",
+    "urldecode": "url",
+    "htmlentity": "html",
+    "unicode-escape": "unicode",
     "rail": "railfence",
     "zhalan": "railfence",
     "kaisa": "caesar",
@@ -448,11 +712,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-f", "--file", help="read input text from file")
     parser.add_argument("-k", "--key", help="key for vigenere/xor")
     parser.add_argument("-s", "--shift", type=int, default=3, help="caesar shift, default 3")
+    parser.add_argument("-a", type=int, default=5, help="affine cipher a value, default 5")
+    parser.add_argument("-b", type=int, default=8, help="affine cipher b value, default 8")
     parser.add_argument("-r", "--rails", type=int, default=2, help="rail fence rails, default 2")
     parser.add_argument("--hash", default="md5", help="hash algorithm for hash action, default md5")
     parser.add_argument("--input", choices=["hex", "base64", "raw"], default="hex", help="xor decode input format")
     parser.add_argument("--output", choices=["hex", "base64", "raw"], default="hex", help="xor encode output format")
     parser.add_argument("--encoding", default="utf-8", help="text encoding, default utf-8")
+    parser.add_argument("--padding", action="store_true", help="keep padding for base64url encode")
     parser.add_argument("--list", action="store_true", help="list supported algorithms")
     return parser
 

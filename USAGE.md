@@ -1,6 +1,6 @@
 # ctf_crypto.py 使用说明
 
-`ctf_crypto.py` 是本仓库新增的统一 CTF 加解密/加解码工具，兼容 Python 3。旧脚本仍然保留，新工具提供统一命令协议，方便在比赛里快速尝试。
+`ctf_crypto.py` 是本仓库统一的 CTF 加解密/加解码工具，兼容 Python 3。仓库已从零散脚本重构为单入口命令协议，方便在比赛里快速尝试。
 
 ## 查看支持算法
 
@@ -10,10 +10,10 @@ python ctf_crypto.py --list
 
 当前支持：
 
-- Base 系列：`base16`、`base32`、`base64`、`base85`、`ascii85`
+- Base 系列：`base16`、`base32`、`base32hex`、`base36`、`base45`、`base58`、`base62`、`base64`、`base64url`、`base85`、`ascii85`、`base91`
 - 字节编码：`hex`、`bin`、`oct`、`dec`
-- Web 编码：`url`、`html`、`qp`
-- 古典密码：`rot13`、`caesar`、`atbash`、`vigenere`、`railfence`
+- Web/文本编码：`url`、`html`、`qp`、`unicode`、`punycode`、`jwt`
+- 古典密码：`rot13`、`rot47`、`caesar`、`atbash`、`affine`、`vigenere`、`railfence`
 - CTF 常见：`morse`、`bacon`、`reverse`、`xor`
 - 哈希：`hash`，支持 `md5`、`sha1`、`sha256`、`sha512` 等 `hashlib` 算法
 
@@ -48,6 +48,9 @@ Base64：
 ```bash
 python ctf_crypto.py base64 encode hello
 python ctf_crypto.py base64 decode aGVsbG8=
+python ctf_crypto.py base64url encode "a+b/c?"
+python ctf_crypto.py base58 encode flag
+python ctf_crypto.py base91 encode flag
 ```
 
 Hex：
@@ -62,6 +65,9 @@ URL：
 ```bash
 python ctf_crypto.py url encode "a b&c"
 python ctf_crypto.py url decode a%20b%26c
+python ctf_crypto.py unicode encode "你好"
+python ctf_crypto.py punycode encode "你好"
+python ctf_crypto.py jwt decode eyJhbGciOiJub25lIn0.eyJzdWIiOiJjdGYifQ.
 ```
 
 凯撒：
@@ -70,6 +76,9 @@ python ctf_crypto.py url decode a%20b%26c
 python ctf_crypto.py caesar encode attack --shift 3
 python ctf_crypto.py caesar decode dwwdfn --shift 3
 python ctf_crypto.py caesar brute khoor
+python ctf_crypto.py rot47 encode "Hello!"
+python ctf_crypto.py affine encode attack -a 5 -b 8
+python ctf_crypto.py affine decode izzisg -a 5 -b 8
 ```
 
 维吉尼亚：
@@ -121,8 +130,15 @@ python ctf_crypto.py hash encode flag --hash sha256
 为了兼容仓库里旧脚本命名，新工具支持一些别名：
 
 - `b64` -> `base64`
+- `b64url` -> `base64url`
 - `b32` -> `base32`
+- `b32hex` -> `base32hex`
 - `b16` -> `base16`
+- `b36` -> `base36`
+- `b45` -> `base45`
+- `b58` -> `base58`
+- `b62` -> `base62`
+- `b91` -> `base91`
 - `kaisa` -> `caesar`
 - `peigen` -> `bacon`
 - `zhalan` / `rail` -> `railfence`
